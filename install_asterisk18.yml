@@ -1,0 +1,178 @@
+---
+- name: Remove existing Asterisk and install Asterisk 18 on AlmaLinux 9
+  hosts: all
+  become: yes
+  tasks:
+    - name: Stop Asterisk service
+      systemd:
+        name: asterisk
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove Asterisk packages
+      dnf:
+        name: "asterisk*"
+        state: absent
+
+    - name: Remove unnecessary packages
+      dnf:
+        autoremove: yes
+
+    - name: Remove Asterisk directories and files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/asterisk
+        - /var/lib/asterisk
+        - /var/log/asterisk
+        - /var/spool/asterisk
+        - /usr/lib/asterisk
+
+    - name: Find and remove residual Asterisk files
+      command: find / -name "*asterisk*" -exec rm -rf {} \;
+      ignore_errors: yes
+
+    - name: Clean DNF cache
+      command: dnf clean all
+
+    - name: Update system
+      dnf:
+        name: "*"
+        state: latest
+      ignore_errors: yes
+
+    - name: Set SELinux to permissive
+      selinux:
+        policy: targeted
+        state: permissive
+
+    - name: Install required packages for Asterisk
+      dnf:
+        name:
+          - git
+          - wget
+          - vim
+          - net-tools
+          - sqlite-devel
+          - psmisc
+          - ncurses-devel
+          - newt-devel
+          - libxml2-devel
+          - libtiff-devel
+          - gtk2-devel
+          - libtool
+          - libuuid-devel
+          - subversion
+          - kernel-devel
+          - kernel-devel-{{ ansible_kernel }}
+          - crontabs
+          - cronie-anacron
+          - libedit
+          - libedit-devel
+          - speexdsp-devel
+          - ansible
+        state: present
+      ignore_errors: yes
+
+    - name: Clone and install PJSIP
+      block:
+        - name: Clone PJSIP repository
+          git:
+            repo: https://github.com/pjsip/pjproject.git
+            dest: /usr/local/src/pjproject
+          ignore_errors: yes
+
+        - name: Build and install PJSIP
+          shell: |
+            cd /usr/local/src/pjproject
+            ./configure CFLAGS="-DNDEBUG -DPJ_HAS_IPV6=1" --prefix=/usr --libdir=/usr/lib64 --enable-shared --disable-video --disable-sound --disable-opencore-amr
+            make dep
+            make
+            make install
+            ldconfig
+          args:
+            executable: /bin/bash
+          ignore_errors: yes
+
+    - name: Download and install Asterisk 18
+      block:
+        - name: Download Asterisk source
+          get_url:
+            url: http://downloads.asterisk.org/pub/telephony/asterisk/asterisk-18-current.tar.gz
+            dest: /usr/local/src/asterisk-18.tar.gz
+
+        - name: Extract Asterisk source
+          unarchive:
+            src: /usr/local/src/asterisk-18.tar.gz
+            dest: /usr/local/src/
+            remote_src: yes
+
+        - name: Build and install Asterisk
+          shell: |
+            cd /usr/local/src/asterisk-18*/
+            ./configure --libdir=/usr/lib64
+            make menuselect.makeopts
+            menuselect/menuselect --enable chan_sip menuselect.makeopts
+            contrib/scripts/get_mp3_source.sh
+            make
+            make install
+            make samples
+            make config
+            ldconfig
+          args:
+            executable: /bin/bash
+
+    - name: Ensure chan_sip is loaded in modules.conf
+      replace:
+        path: /etc/asterisk/modules.conf
+        regexp: '^noload = chan_sip.so'
+        replace: 'load = chan_sip.so'
+
+    - name: Create Asterisk user and set permissions
+      block:
+        - name: Create Asterisk group
+          group:
+            name: asterisk
+            state: present
+
+        - name: Create Asterisk user
+          user:
+            name: asterisk
+            group: asterisk
+            home: /var/lib/asterisk
+            shell: /sbin/nologin
+            system: yes
+
+        - name: Add Asterisk user to required groups
+          user:
+            name: asterisk
+            groups: audio,dialout
+            append: yes
+
+        - name: Set Asterisk ownership on directories
+          file:
+            path: "{{ item }}"
+            owner: asterisk
+            group: asterisk
+            recurse: yes
+          loop:
+            - /etc/asterisk
+            - /var/lib/asterisk
+            - /var/log/asterisk
+            - /var/spool/asterisk
+            - /usr/lib64/asterisk
+
+    - name: Reload systemd to recognize new service files
+      command: systemctl daemon-reload
+      ignore_errors: yes
+
+    - name: Start Asterisk service
+      shell: service asterisk start
+
+    - name: Enable and start Asterisk(systemctl)
+      systemd:
+        name: asterisk
+        state: started
+        enabled: yes
