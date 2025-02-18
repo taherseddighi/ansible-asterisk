@@ -1,0 +1,119 @@
+---
+- name: Remove existing Asterisk and Install Asterisk 20 on AlmaLinux 9
+  hosts: asterisk_servers
+  become: yes
+  tasks:
+    - name: Stop Asterisk service
+      systemd:
+        name: asterisk
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove Asterisk packages
+      dnf:
+        name: "asterisk*"
+        state: absent
+
+    - name: Remove unnecessary packages
+      dnf:
+        autoremove: yes
+
+    - name: Remove Asterisk directories and files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/asterisk
+        - /var/lib/asterisk
+        - /var/log/asterisk
+        - /var/spool/asterisk
+        - /usr/lib/asterisk
+
+    - name: Find and remove residual Asterisk files
+      command: find / -name "*asterisk*" -exec rm -rf {} \;
+      ignore_errors: yes
+
+    - name: Clean DNF cache
+      command: dnf clean all
+
+    - name: Ensure required packages are installed
+      ansible.builtin.dnf:
+        name:
+          - epel-release
+          - initscripts
+          - svn
+          - chkconfig
+          - nano
+          - wget
+          - tar
+          - gcc
+          - gcc-c++
+          - make
+          - ncurses-devel
+          - libxml2-devel
+          - sqlite-devel
+          - libsrtp-devel
+          - libuuid-devel
+          - jansson-devel
+          - pjproject-devel
+        state: present
+      ignore_errors: yes
+
+    - name: Disable SELinux temporarily
+      ansible.builtin.command: setenforce 0
+      ignore_errors: yes
+
+    - name: Enable CRB repo
+      ansible.builtin.command: dnf config-manager --set-enabled crb
+      changed_when: false
+
+    - name: Install Development Tools group
+      ansible.builtin.command: dnf group install -y "Development Tools"
+      changed_when: false
+
+    - name: Download and extract Asterisk 20
+      ansible.builtin.shell: |
+        cd /usr/src && 
+        wget -O asterisk-20.tar.gz http://downloads.asterisk.org/pub/telephony/asterisk/asterisk-20-current.tar.gz && 
+        tar xvfz asterisk-20.tar.gz
+      args:
+        creates: /usr/src/asterisk-20*
+
+    - name: Build and install Asterisk 20
+      ansible.builtin.shell: |
+        cd /usr/src/asterisk-20*/ && 
+        ./contrib/scripts/get_mp3_source.sh && 
+        contrib/scripts/install_prereq install && 
+        ./configure --libdir=/usr/lib64 --with-jansson-bundled && 
+        make menuselect.makeopts && 
+        menuselect/menuselect --enable chan_sip menuselect.makeopts && 
+        make && 
+        make install && 
+        make samples && 
+        make basic-pbx && 
+        make config && 
+        ldconfig
+      args:
+        chdir: /usr/src/asterisk-20.12.0/
+
+    - name: Add chan_sip to modules.conf
+      ansible.builtin.lineinfile:
+        path: /etc/asterisk/modules.conf
+        line: "load => chan_sip.so"
+        insertafter: "[modules]"
+        state: present
+
+    - name: Reload systemd daemon
+      ansible.builtin.command: systemctl daemon-reload
+
+    - name: Start Asterisk service
+      ansible.builtin.systemd:
+        name: asterisk
+        state: started
+
+    - name: Start and enable Asterisk
+      ansible.builtin.systemd:
+        name: asterisk
+        state: started
+        enabled: yes
